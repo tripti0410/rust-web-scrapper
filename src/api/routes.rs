@@ -6,13 +6,14 @@ use axum::{
 };
 use tower_http::cors::{CorsLayer, Any};
 use chrono::Utc;
+use std::time::Duration;
 
 use crate::error::{Result, AppError};
 use crate::api::models::{ScrapeRequest, ScrapeResponse};
 use crate::api::response;
 use crate::scraper::{fetch_html, extract_body, format_html, build_prompt};
 use crate::llm::call_openrouter;
-use crate::AppState;
+use crate::{AppState, CachedResponse};
 
 pub fn create_router(app_state: AppState) -> Router {
     Router::new()
@@ -30,48 +31,193 @@ async fn scrape_handler(
     State(state): State<AppState>,
     Json(req): Json<ScrapeRequest>,
 ) -> impl IntoResponse {
-    match process_scrape_request(&state, &req).await {
-        Ok(response_data) => response::success(response_data),
-        Err(err) => {
-            let (status, msg) = match &err {
-                AppError::FetchError(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
-                AppError::ParseError(msg) => (axum::http::StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
-                AppError::LlmError(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-                AppError::ConfigError(msg) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            };
-            
-            response::error(status, msg)
-        }
+    println!("🔍 Processing request for URL: {}", req.url);
+    let start_time = std::time::Instant::now();
+    
+    // Set an overall timeout for the entire handler
+    let result = tokio::time::timeout(
+        Duration::from_secs(90), // Overall handler timeout of 90 seconds
+        process_scrape_request(&state, &req)
+    ).await;
+    
+    let elapsed = start_time.elapsed();
+    println!("⏱️ Request processing took: {:?}", elapsed);
+    
+    match result {
+        Ok(result) => match result {
+            Ok(response_data) => {
+                println!("✅ Successfully processed URL: {}", req.url);
+                response::success(response_data)
+            },
+            Err(err) => {
+                let (status, msg) = match &err {
+                    AppError::FetchError(msg) => {
+                        println!("❌ Fetch error: {}", msg);
+                        (axum::http::StatusCode::BAD_REQUEST, msg.clone())
+                    },
+                    AppError::ParseError(msg) => {
+                        println!("❌ Parse error: {}", msg);
+                        (axum::http::StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
+                    },
+                    AppError::LlmError(msg) => {
+                        println!("❌ LLM error: {}", msg);
+                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+                    },
+                    AppError::ConfigError(msg) => {
+                        println!("❌ Config error: {}", msg);
+                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+                    },
+                };
+                
+                response::error(status, msg)
+            }
+        },
+        Err(_) => {
+            println!("⏱️ Request timed out after {:?}", elapsed);
+            response::error(
+                axum::http::StatusCode::REQUEST_TIMEOUT, 
+                "Request processing timed out".to_string()
+            )
+        },
     }
 }
 
 async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result<ScrapeResponse> {
-    // Fetch and process HTML
-    let html = fetch_html(&req.url).await?;
+    // Check cache first
+    let cache_key = &req.url;
     
+    // Try to get from cache with lock scope to minimize lock contention
+    {
+        let cache = state.cache.lock().unwrap();
+        if let Some(cached) = cache.get(cache_key) {
+            // Only use cache if it's less than 24 hours old
+            let cache_age = Utc::now() - cached.timestamp;
+            if cache_age < chrono::Duration::hours(24) {
+                println!("🎯 Cache hit for URL: {}", req.url);
+                return Ok(ScrapeResponse {
+                    url: req.url.clone(),
+                    summary: cached.summary.clone(),
+                    scraped_at: Utc::now(),
+                    word_count: cached.word_count,
+                    status: "success (cached)".to_string(),
+                });
+            }
+        }
+    }
+
+    println!("🌐 Fetching HTML for URL: {}", req.url);
+    let fetch_start = std::time::Instant::now();
+    
+    // Fetch with even shorter timeout - 5 seconds
+    let html_result = tokio::time::timeout(
+        Duration::from_secs(5), 
+        fetch_html(&req.url)
+    ).await;
+    
+    let html = match html_result {
+        Ok(result) => {
+            match result {
+                Ok(html) => {
+                    println!("✅ HTML fetch successful in {:?}", fetch_start.elapsed());
+                    html
+                },
+                Err(e) => {
+                    println!("❌ HTML fetch error: {}", e);
+                    return Err(AppError::FetchError(format!("Failed to fetch HTML: {}", e)));
+                }
+            }
+        },
+        Err(_) => {
+            println!("⏱️ HTML fetch timed out after 5 seconds");
+            return Err(AppError::FetchError("HTML fetch timed out after 5 seconds".to_string()));
+        }
+    };
+    
+    println!("🔍 Extracting and formatting HTML content");
     let raw_body = extract_body(&html)
-        .ok_or_else(|| crate::error::AppError::ParseError("No <body> tag found in the HTML".to_string()))?;
+        .ok_or_else(|| {
+            println!("❌ No <body> tag found in HTML");
+            crate::error::AppError::ParseError("No <body> tag found in the HTML".to_string())
+        })?;
     
     let formatted = format_html(&raw_body);
+    
+    // Further reduce content size for better performance
+    let (formatted, truncated) = if formatted.len() > 2000 {
+        println!("✂️ Truncating content from {} to 2000 chars", formatted.len());
+        (formatted[0..2000].to_string(), true)
+    } else {
+        println!("📏 Content size: {} chars (not truncated)", formatted.len());
+        (formatted, false)
+    };
+    
     let prompt = build_prompt(&formatted);
+    println!("📝 Built prompt with length: {} chars", prompt.len());
 
     // Calculate word count
     let word_count = formatted.split_whitespace().count();
+    println!("📊 Word count: {}", word_count);
 
-    // Call LLM
-    let summary = call_openrouter(
-        &state.config.openrouter_api_key, 
-        &prompt, 
-        Some(&req.url), 
-        None
-    ).await?;
+    println!("🤖 Calling LLM API...");
+    let llm_start = std::time::Instant::now();
+    
+    // Try with an even shorter timeout for the LLM
+    let summary_result = tokio::time::timeout(
+        Duration::from_secs(15),
+        call_openrouter(
+            &state.config.openrouter_api_key, 
+            &prompt, 
+            Some(&req.url), 
+            None
+        )
+    ).await;
+    
+    let summary = match summary_result {
+        Ok(result) => {
+            match result {
+                Ok(summary) => {
+                    println!("✅ LLM API call successful in {:?}", llm_start.elapsed());
+                    summary
+                },
+                Err(e) => {
+                    println!("❌ LLM API error: {}", e);
+                    return Err(AppError::LlmError(format!("LLM API error: {}", e)));
+                }
+            }
+        },
+        Err(e) => {
+            println!("⏱️ LLM API timeout error: {:?}", e);
+            println!("⏱️ LLM API call timed out after 15 seconds");
+            return Err(AppError::LlmError("LLM API call timed out after 15 seconds".to_string()));
+        }
+    };
 
+    println!("📝 Formatting summary...");
     // Ensure proper Markdown formatting
     let formatted_summary = ensure_markdown_formatting(&summary);
+    
+    // Add truncation notice if needed
+    let final_summary = if truncated {
+        format!("{}\n\n*Note: Content was truncated due to size limitations.*", formatted_summary)
+    } else {
+        formatted_summary
+    };
 
+    println!("💾 Storing result in cache");
+    // Store in cache
+    {
+        let mut cache = state.cache.lock().unwrap();
+        cache.insert(req.url.clone(), CachedResponse {
+            summary: final_summary.clone(),
+            word_count,
+            timestamp: Utc::now(),
+        });
+    }
+
+    println!("✅ Request completed successfully for URL: {}", req.url);
     Ok(ScrapeResponse {
         url: req.url.clone(),
-        summary: formatted_summary,
+        summary: final_summary,
         scraped_at: Utc::now(),
         word_count,
         status: "success".to_string(),

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use rust_web_scrapper::{
     config::Config,
     api::routes::create_router,
@@ -16,6 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create application state
     let app_state = AppState {
         config: Arc::new(config),
+        cache: Arc::new(Mutex::new(HashMap::new())),
     };
     
     // Build the router with routes

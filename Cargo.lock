@@ -1260,6 +1260,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenv",
+ "once_cell",
  "reqwest",
  "scraper",
  "serde",
