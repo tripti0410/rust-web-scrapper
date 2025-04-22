@@ -31,7 +31,7 @@ async fn scrape_handler(
     State(state): State<AppState>,
     Json(req): Json<ScrapeRequest>,
 ) -> impl IntoResponse {
-    println!("🔍 Processing request for URL: {}", req.url);
+    println!("Processing request for URL: {}", req.url);
     let start_time = std::time::Instant::now();
     
     // Set an overall timeout for the entire handler
@@ -41,30 +41,30 @@ async fn scrape_handler(
     ).await;
     
     let elapsed = start_time.elapsed();
-    println!("⏱️ Request processing took: {:?}", elapsed);
+    println!("Request Processing took: {:?}", elapsed);
     
     match result {
         Ok(result) => match result {
             Ok(response_data) => {
-                println!("✅ Successfully processed URL: {}", req.url);
+                println!("Successfully processed URL: {}", req.url);
                 response::success(response_data)
             },
             Err(err) => {
                 let (status, msg) = match &err {
                     AppError::FetchError(msg) => {
-                        println!("❌ Fetch error: {}", msg);
+                        println!("Fetch error: {}", msg);
                         (axum::http::StatusCode::BAD_REQUEST, msg.clone())
                     },
                     AppError::ParseError(msg) => {
-                        println!("❌ Parse error: {}", msg);
+                        println!("Parse error: {}", msg);
                         (axum::http::StatusCode::UNPROCESSABLE_ENTITY, msg.clone())
                     },
                     AppError::LlmError(msg) => {
-                        println!("❌ LLM error: {}", msg);
+                        println!("LLM error: {}", msg);
                         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
                     },
                     AppError::ConfigError(msg) => {
-                        println!("❌ Config error: {}", msg);
+                        println!("Config error: {}", msg);
                         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
                     },
                 };
@@ -73,7 +73,7 @@ async fn scrape_handler(
             }
         },
         Err(_) => {
-            println!("⏱️ Request timed out after {:?}", elapsed);
+            println!("Request timed out after {:?}", elapsed);
             response::error(
                 axum::http::StatusCode::REQUEST_TIMEOUT, 
                 "Request processing timed out".to_string()
@@ -93,7 +93,7 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
             // Only use cache if it's less than 24 hours old
             let cache_age = Utc::now() - cached.timestamp;
             if cache_age < chrono::Duration::hours(24) {
-                println!("🎯 Cache hit for URL: {}", req.url);
+                println!("Cache hit for URL: {}", req.url);
                 return Ok(ScrapeResponse {
                     url: req.url.clone(),
                     summary: cached.summary.clone(),
@@ -105,7 +105,7 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
         }
     }
 
-    println!("🌐 Fetching HTML for URL: {}", req.url);
+    println!("Fetching HTML for URL: {}", req.url);
     let fetch_start = std::time::Instant::now();
     
     // Fetch with even shorter timeout - 5 seconds
@@ -118,17 +118,17 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
         Ok(result) => {
             match result {
                 Ok(html) => {
-                    println!("✅ HTML fetch successful in {:?}", fetch_start.elapsed());
+                    println!("HTML fetch successful in {:?}", fetch_start.elapsed());
                     html
                 },
                 Err(e) => {
-                    println!("❌ HTML fetch error: {}", e);
+                    println!("HTML fetch error: {}", e);
                     return Err(AppError::FetchError(format!("Failed to fetch HTML: {}", e)));
                 }
             }
         },
         Err(_) => {
-            println!("⏱️ HTML fetch timed out after 5 seconds");
+            println!("HTML fetch timed out after 5 seconds");
             return Err(AppError::FetchError("HTML fetch timed out after 5 seconds".to_string()));
         }
     };
@@ -136,29 +136,21 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
     println!("🔍 Extracting and formatting HTML content");
     let raw_body = extract_body(&html)
         .ok_or_else(|| {
-            println!("❌ No <body> tag found in HTML");
+            println!("No <body> tag found in HTML");
             crate::error::AppError::ParseError("No <body> tag found in the HTML".to_string())
         })?;
     
     let formatted = format_html(&raw_body);
-    
-    // Further reduce content size for better performance
-    let (formatted, truncated) = if formatted.len() > 2000 {
-        println!("✂️ Truncating content from {} to 2000 chars", formatted.len());
-        (formatted[0..2000].to_string(), true)
-    } else {
-        println!("📏 Content size: {} chars (not truncated)", formatted.len());
-        (formatted, false)
-    };
+    println!("Content size: {} chars (using full content)", formatted.len());
     
     let prompt = build_prompt(&formatted);
-    println!("📝 Built prompt with length: {} chars", prompt.len());
+    println!("Built prompt with length: {} chars", prompt.len());
 
     // Calculate word count
     let word_count = formatted.split_whitespace().count();
-    println!("📊 Word count: {}", word_count);
+    println!("Word count: {}", word_count);
 
-    println!("🤖 Calling LLM API...");
+    println!("Calling LLM API...");
     let llm_start = std::time::Instant::now();
     
     // Try with an even shorter timeout for the LLM
@@ -176,34 +168,30 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
         Ok(result) => {
             match result {
                 Ok(summary) => {
-                    println!("✅ LLM API call successful in {:?}", llm_start.elapsed());
+                    println!("LLM API call successful in {:?}", llm_start.elapsed());
                     summary
                 },
                 Err(e) => {
-                    println!("❌ LLM API error: {}", e);
+                    println!("LLM API error: {}", e);
                     return Err(AppError::LlmError(format!("LLM API error: {}", e)));
                 }
             }
         },
         Err(e) => {
-            println!("⏱️ LLM API timeout error: {:?}", e);
-            println!("⏱️ LLM API call timed out after 15 seconds");
+            println!("LLM API timeout error: {:?}", e);
+            println!("LLM API call timed out after 15 seconds");
             return Err(AppError::LlmError("LLM API call timed out after 15 seconds".to_string()));
         }
     };
 
-    println!("📝 Formatting summary...");
+    println!("Formatting summary...");
     // Ensure proper Markdown formatting
     let formatted_summary = ensure_markdown_formatting(&summary);
     
-    // Add truncation notice if needed
-    let final_summary = if truncated {
-        format!("{}\n\n*Note: Content was truncated due to size limitations.*", formatted_summary)
-    } else {
-        formatted_summary
-    };
+    // No truncation happening now, so use the summary directly
+    let final_summary = formatted_summary;
 
-    println!("💾 Storing result in cache");
+    println!("Storing result in cache");
     // Store in cache
     {
         let mut cache = state.cache.lock().unwrap();
@@ -214,7 +202,7 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
         });
     }
 
-    println!("✅ Request completed successfully for URL: {}", req.url);
+    println!("Request completed successfully for URL: {}", req.url);
     Ok(ScrapeResponse {
         url: req.url.clone(),
         summary: final_summary,
@@ -229,12 +217,12 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
 fn ensure_markdown_formatting(text: &str) -> String {
     let text = text.trim();
     
-    // If the text doesn't start with a Markdown heading, add one
+    // Make sure it has a title/heading
     if !text.starts_with('#') {
-        // Try to find a good title from the first line
-        let first_line = text.lines().next().unwrap_or("Summary");
+        // Try to find a good title from the first line or use "Website Summary"
+        let first_line = text.lines().next().unwrap_or("Website Summary");
         let title = if first_line.len() > 50 {
-            "Summary"
+            "Website Summary"
         } else {
             first_line
         };

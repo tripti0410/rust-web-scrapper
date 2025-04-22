@@ -36,31 +36,27 @@ pub async fn call_openrouter(
     site_url: Option<&str>,
     site_name: Option<&str>
 ) -> Result<String> {
-    println!("🔍 Preparing LLM request");
-    
-    // Aggressively limit input size - reduced to 1000 characters
-    let truncated_input = if input_markdown.len() > 1000 {
-        println!("✂️ Truncating prompt from {} to 1000 chars", input_markdown.len());
-        &input_markdown[0..1000]
-    } else {
-        println!("📏 Prompt size: {} chars", input_markdown.len());
-        input_markdown
-    };
+    println!("Preparing LLM request");
+    println!("Using full content: {} chars", input_markdown.len());
     
     let body = ChatRequest {
-        model: "deepseek/deepseek-chat-v3-0324".into(),
+        model: "qwen/qwen-2.5-7b-instruct:free".into(),
         messages: vec![
             Message {
+                role: "system".into(),
+                content: "You are a content summarizer that extracts the main points from web content. Identify the key information, main arguments, and important details. Ignore HTML markup and focus on the actual text content. Format your summary using clear Markdown structure with headers and bullet points.".into(),
+            },
+            Message {
                 role: "user".into(),
-                content: truncated_input.into(),
+                content: input_markdown.into(),
             }
         ],
-        max_tokens: Some(400),        // Reduced further
+        max_tokens: Some(800),
         temperature: Some(0.1),
-        timeout: Some(10),
+        timeout: Some(15),
     };
     
-    println!("📦 Request payload: model={}, max_tokens={}, temperature={}", 
+    println!("Request payload: model={}, max_tokens={}, temperature={}", 
              body.model, body.max_tokens.unwrap_or(0), body.temperature.unwrap_or(0.0));
     
     // Try up to 3 times with exponential backoff
@@ -69,7 +65,7 @@ pub async fn call_openrouter(
     
     for attempt in 0..=max_retries {
         if attempt > 0 {
-            println!("🔄 Retry attempt {} for LLM API request", attempt);
+            println!("Retry attempt {} for LLM API request", attempt);
             // Exponential backoff between retries
             tokio::time::sleep(Duration::from_millis(500 * 2u64.pow(attempt as u32))).await;
         }
@@ -89,26 +85,26 @@ pub async fn call_openrouter(
             request = request.header("X-Title", name);
         }
         
-        println!("📤 Sending request to OpenRouter API (attempt {})", attempt + 1);
+        println!("Sending request to OpenRouter API (attempt {})", attempt + 1);
         
         match request.send().await {
             Ok(res) => {
                 let status = res.status();
-                println!("📥 Received response with status: {}", status);
+                println!("Received response with status: {}", status);
                 
                 if status.is_success() {
                     match res.json::<serde_json::Value>().await {
                         Ok(json) => {
                             if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
-                                println!("✅ Successfully received LLM response ({} chars)", content.len());
+                                println!("Successfully received LLM response ({} chars)", content.len());
                                 return Ok(content.to_string());
                             } else {
-                                println!("❌ Invalid response format: {:?}", json);
+                                println!("Invalid response format: {:?}", json);
                                 last_error = "Invalid response format".to_string();
                             }
                         },
                         Err(e) => {
-                            println!("❌ Failed to parse JSON: {}", e);
+                            println!("Failed to parse JSON: {}", e);
                             last_error = format!("JSON parse error: {}", e);
                         }
                     }
@@ -116,7 +112,7 @@ pub async fn call_openrouter(
                     // Try to get error message from response
                     match res.text().await {
                         Ok(text) => {
-                            println!("❌ Error response: {}", text);
+                            println!("Error response: {}", text);
                             last_error = format!("API error ({}): {}", status, text);
                         },
                         Err(e) => {
@@ -126,23 +122,23 @@ pub async fn call_openrouter(
                     
                     // Don't retry on certain status codes
                     if status.as_u16() == 401 || status.as_u16() == 403 {
-                        println!("⛔ Not retrying due to authentication error");
+                        println!("Not retrying due to authentication error");
                         break;
                     }
                 }
             },
             Err(e) => {
-                println!("❌ Request error: {}", e);
+                println!("Request error: {}", e);
                 last_error = format!("Request error: {}", e);
                 
                 if e.is_timeout() {
-                    println!("⏱️ Request timed out");
+                    println!("Request timed out");
                     last_error = "Request timed out".to_string();
                 }
             }
         }
     }
     
-    println!("❌ All retry attempts failed");
+    println!("All retry attempts failed");
     Err(AppError::LlmError(last_error))
 }
