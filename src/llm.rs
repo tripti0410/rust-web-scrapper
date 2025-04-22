@@ -22,8 +22,8 @@ struct ChatRequest {
 // Create a static client to reuse connections with shorter timeout
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     ClientBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(3))   
+        .timeout(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(10))   
         .pool_max_idle_per_host(5)
         .pool_idle_timeout(Duration::from_secs(30))
         .build()
@@ -40,7 +40,7 @@ pub async fn call_openrouter(
     println!("Using full content: {} chars", input_markdown.len());
     
     let body = ChatRequest {
-        model: "qwen/qwen-2.5-7b-instruct:free".into(),
+        model: "google/gemini-2.0-flash-exp:free".into(),
         messages: vec![
             Message {
                 role: "system".into(),
@@ -51,9 +51,9 @@ pub async fn call_openrouter(
                 content: input_markdown.into(),
             }
         ],
-        max_tokens: Some(800),
+        max_tokens: Some(80000),
         temperature: Some(0.1),
-        timeout: Some(15),
+        timeout: Some(60),
     };
     
     println!("Request payload: model={}, max_tokens={}, temperature={}", 
@@ -73,7 +73,7 @@ pub async fn call_openrouter(
         let mut request = CLIENT
             .post("https://openrouter.ai/api/v1/chat/completions")
             .bearer_auth(api_key)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
             .json(&body);
         
         // Add optional headers if provided

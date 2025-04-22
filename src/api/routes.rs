@@ -154,33 +154,21 @@ async fn process_scrape_request(state: &AppState, req: &ScrapeRequest) -> Result
     let llm_start = std::time::Instant::now();
     
     // Try with an even shorter timeout for the LLM
-    let summary_result = tokio::time::timeout(
-        Duration::from_secs(15),
-        call_openrouter(
-            &state.config.openrouter_api_key, 
-            &prompt, 
-            Some(&req.url), 
-            None
-        )
+    let summary_result = call_openrouter(
+        &state.config.openrouter_api_key, 
+        &prompt, 
+        Some(&req.url), 
+        None
     ).await;
     
     let summary = match summary_result {
-        Ok(result) => {
-            match result {
-                Ok(summary) => {
-                    println!("LLM API call successful in {:?}", llm_start.elapsed());
-                    summary
-                },
-                Err(e) => {
-                    println!("LLM API error: {}", e);
-                    return Err(AppError::LlmError(format!("LLM API error: {}", e)));
-                }
-            }
+        Ok(summary) => {
+            println!("LLM API call successful in {:?}", llm_start.elapsed());
+            summary
         },
         Err(e) => {
-            println!("LLM API timeout error: {:?}", e);
-            println!("LLM API call timed out after 15 seconds");
-            return Err(AppError::LlmError("LLM API call timed out after 15 seconds".to_string()));
+            println!("LLM API error: {}", e);
+            return Err(AppError::LlmError(format!("LLM API error: {}", e)));
         }
     };
 
